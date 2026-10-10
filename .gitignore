@@ -1,0 +1,31 @@
+﻿# Build / simulation
+build/
+work/
+logs/
+xsim.dir/
+
+# ModelSim / Questa
+*.wlf
+transcript
+modelsim.ini
+wlft*
+
+# Vivado / XSim
+*.jou
+*.log
+*.pb
+*.vstf
+webtalk*
+xelab*
+xvlog*
+
+# Python
+__pycache__/
+*.pyc
+*.pyd
+
+# Temporary
+*.zip
+rtl 2/
+%SystemDrive%/
+*.err
