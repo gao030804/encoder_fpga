@@ -5,8 +5,11 @@
 // 每个投影参数记录：bias INT64容器、M32、S8、3Byte保留。
 // 每级记录前10Byte：next M32/S8、output M32/S8；其余保留。
 module rvq_backend_w8a16 #(
+    parameter USE_SDRAM=0,
     parameter COMPUTE_VECTOR = 1 // 完整系统默认关闭；软件根据indices和码本重建
 ) (
+    input external_model_ready,output sdram_rvq_valid,input sdram_rvq_ready,output [25:0] sdram_rvq_addr,
+    input sdram_rvq_rsp_valid,output sdram_rvq_rsp_ready,input [255:0] sdram_rvq_data,
     input clk, input rst_n,
     input boot_write, input [15:0] boot_index, input [255:0] boot_data,
     input start, output busy, output reg error, output reg configured,
@@ -56,11 +59,22 @@ reg [15:0] byte_address;
 wire [255:0] mem_data;
 wire mem_valid;
 wire [10:0] mem_address = boot_write ? boot_index[10:0] : byte_address[15:5];
+generate if(!USE_SDRAM)begin : g_legacy
+assign sdram_rvq_valid=0;assign sdram_rvq_addr=0;assign sdram_rvq_rsp_ready=0;
 opentitan_sram_1p_adapter #(.WIDTH(256),.DEPTH(1536)) u_storage (
     .clk_i(clk),.rst_ni(rst_n),.req_i(boot_write || mem_req),
     .write_i(boot_write),.addr_i(mem_address),.wdata_i(boot_data),
     .wmask_i(32'hffffffff),.rdata_o(mem_data),.rvalid_o(mem_valid)
 );
+end else begin : g_sdram
+rvq_stage_cache u_stage_cache (
+    .clk(clk),.rst_n(rst_n),.mem_req(mem_req),.byte_address(byte_address),.stage(stage),
+    .mem_valid(mem_valid),.mem_data(mem_data),.line_valid(sdram_rvq_valid),
+    .line_ready(sdram_rvq_ready),.line_addr(sdram_rvq_addr),
+    .line_rsp_valid(sdram_rvq_rsp_valid),.line_rsp_ready(sdram_rvq_rsp_ready),
+    .line_data(sdram_rvq_data),.fill_busy()
+);
+end endgenerate
 // stage0有256项，后续各128项。地址只遍历实际码字，不搜索padding。
 wire [10:0] stage_base = (stage==0) ? 11'd0 : 11'd256+(stage-1)*11'd128;
 wire [10:0] entry_id = stage_base+candidate;
@@ -157,7 +171,8 @@ always @(posedge clk or negedge rst_n) begin
         projection_channel<=0;projection_data<=0;
     end else begin
         projection_valid<=0;score_valid<=0;update_valid<=0;stage_valid<=0;
-        if(boot_write) begin
+        if(USE_SDRAM && external_model_ready)configured<=1;
+        if(!USE_SDRAM && boot_write) begin
             if(busy || boot_index!=loaded_blocks || boot_index>=1536) error<=1;
             loaded_blocks<=loaded_blocks+1'b1;
             if(boot_index==1535) configured<=1;

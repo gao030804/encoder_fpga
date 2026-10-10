@@ -3,7 +3,9 @@
 // Flash Boot 镜像的 0x28000..0x35fff 参数区：上电写 RAM，随后读出
 // Residual/PCM 全局配置，并按 physical_layer/output_group 返回 112B 参数组。
 // 层起始偏移来自当前 encoder_manifest 的固定版本；换模型必须同时重生成此表。
-module parameter_controller (
+module parameter_controller #(parameter USE_SDRAM=0) (
+    output sdram_param_valid,input sdram_param_ready,output [25:0] sdram_param_addr,
+    input sdram_param_rsp_valid,output sdram_param_rsp_ready,input [255:0] sdram_param_data,
     input clk, input rst_n,
     input boot_write, input [12:0] boot_block, input [255:0] boot_data,
     input boot_done,
@@ -43,6 +45,8 @@ assign param_shift_data = store_rsp_data[831:768];
 assign param_zero_point_data = store_rsp_data[895:832];
 assign residual_scale_params = residual_regs[physical_layer];
 
+generate if(!USE_SDRAM)begin : g_legacy
+assign sdram_param_valid=0;assign sdram_param_addr=0;assign sdram_param_rsp_ready=0;
 flash_boot_parameter_store u_store (
     .clk(clk), .rst_n(rst_n), .boot_write(boot_write),
     .boot_block(boot_block), .boot_data(boot_data), .boot_done(boot_done),
@@ -51,6 +55,15 @@ flash_boot_parameter_store u_store (
     .rsp_ready(store_rsp_ready), .rsp_data(store_rsp_data)
 );
 
+end else begin : g_sdram
+sdram_parameter_store u_store (
+    .clk(clk),.rst_n(rst_n),.boot_done(boot_done),
+    .req_valid(store_req_valid),.req_ready(store_req_ready),.req_addr(store_req_addr),
+    .rsp_valid(store_rsp_valid),.rsp_ready(store_rsp_ready),.rsp_data(store_rsp_data),
+    .line_valid(sdram_param_valid),.line_ready(sdram_param_ready),.line_addr(sdram_param_addr),
+    .line_rsp_valid(sdram_param_rsp_valid),.line_rsp_ready(sdram_param_rsp_ready),.line_data(sdram_param_data)
+);
+end endgenerate
 integer i;
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin

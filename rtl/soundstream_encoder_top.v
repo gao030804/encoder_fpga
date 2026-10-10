@@ -23,6 +23,7 @@
 // 位宽约定：地址通常按Byte计，Weight块为256 bit，Activation/Weight基本元素为signed INT8。
 // -----------------------------------------------------------------------------
 module soundstream_encoder_top #(
+    parameter USE_SDRAM=0,
     parameter ADDR_WIDTH = 32,
     parameter BUFFER_A_BASE = 32'h0000_1000,
     parameter BUFFER_B_BASE = 32'h0000_5000,
@@ -45,6 +46,12 @@ module soundstream_encoder_top #(
     parameter FAST_SIM_WEIGHT_CACHE = 0,
     parameter RESIDUAL_SCALE_ALIGN_ENABLE = 0
 ) (
+    input external_model_ready,
+    output sdram_weight_valid, input sdram_weight_ready,
+    output [25:0] sdram_weight_addr,
+    input sdram_weight_rsp_valid, output sdram_weight_rsp_ready,
+    input [255:0] sdram_weight_data,
+
     output boot_aux_write,
     output [15:0] boot_aux_index,
     output [255:0] boot_aux_data,
@@ -261,6 +268,7 @@ wire [ADDR_WIDTH-1:0] eng_out_addr;
 wire [63:0] eng_out_data;
 wire [7:0] eng_out_strb;
 conv1d_engine_flash_top #(
+    .USE_SDRAM(USE_SDRAM),
     .FLASH_SPI_DIVIDER           (FLASH_SPI_DIVIDER),
     .WEIGHT_CACHE_BLOCKS         (4096),
     .WEIGHT_CACHE_INDEX_WIDTH    (12),
@@ -274,6 +282,11 @@ conv1d_engine_flash_top #(
     .USE_OCTAL_STREAM_CACHE      (USE_OCTAL_STREAM_WEIGHT_CACHE),
     .FAST_SIM_WEIGHT_CACHE       (FAST_SIM_WEIGHT_CACHE)
 ) u_engine_flash (
+    .external_model_ready(external_model_ready),
+    .sdram_weight_valid(sdram_weight_valid),.sdram_weight_ready(sdram_weight_ready),
+    .sdram_weight_addr(sdram_weight_addr),.sdram_weight_rsp_valid(sdram_weight_rsp_valid),
+    .sdram_weight_rsp_ready(sdram_weight_rsp_ready),.sdram_weight_data(sdram_weight_data),
+
     .boot_aux_write(boot_aux_write),.boot_aux_index(boot_aux_index),.boot_aux_data(boot_aux_data),
     .boot_param_write(boot_param_write),.boot_param_block(boot_param_block),
     .boot_param_data(boot_param_data),

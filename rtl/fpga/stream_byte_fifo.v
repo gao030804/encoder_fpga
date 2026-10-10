@@ -9,7 +9,7 @@ module stream_byte_fifo #(
 ) (
     input clk, input rst_n,
     input in_valid, output in_ready, input [7:0] in_data,
-    output out_valid, input out_ready, output [7:0] out_data,
+    output out_valid, input out_ready, output reg [7:0] out_data,
     output reg [ADDR_WIDTH:0] level,
     output reg overflow
 );
@@ -19,12 +19,18 @@ wire push=in_valid && in_ready;
 wire pop=out_valid && out_ready;
 assign in_ready=(level<DEPTH);
 assign out_valid=(level!=0);
-assign out_data=mem[rd_ptr];
+// Registered head; bypass a just-written empty head. No reset on data/RAM.
+wire [ADDR_WIDTH-1:0] next_rd_ptr=rd_ptr+1'b1;
+always @(posedge clk)begin
+    if(push)mem[wr_ptr]<=in_data;
+    if(pop && level>1)out_data<=mem[next_rd_ptr];
+    else if(push && (level==0 || (pop && level==1)))out_data<=in_data;
+end
 always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
         wr_ptr<=0; rd_ptr<=0; level<=0; overflow<=0;
     end else begin
-        if (push) begin mem[wr_ptr]<=in_data; wr_ptr<=wr_ptr+1'b1; end
+        if (push) wr_ptr<=wr_ptr+1'b1;
         if (pop) rd_ptr<=rd_ptr+1'b1;
         case ({push,pop})
             2'b10: level<=level+1'b1;

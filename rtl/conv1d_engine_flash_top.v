@@ -26,6 +26,7 @@
 // 位宽约定：地址通常按Byte计，Weight块为256 bit，Activation/Weight基本元素为signed INT8。
 // -----------------------------------------------------------------------------
 module conv1d_engine_flash_top #(
+    parameter USE_SDRAM=0,
     parameter ADDR_WIDTH = 32,
     parameter M_TAG_WIDTH = 9,
     parameter MAX_M = 320,
@@ -48,6 +49,12 @@ module conv1d_engine_flash_top #(
     // 仅完整帧仿真置1；综合和真实SPI测试必须保持0。
     parameter FAST_SIM_WEIGHT_CACHE = 0
 ) (
+    input external_model_ready,
+    output sdram_weight_valid, input sdram_weight_ready,
+    output [25:0] sdram_weight_addr,
+    input sdram_weight_rsp_valid, output sdram_weight_rsp_ready,
+    input [255:0] sdram_weight_data,
+
     output boot_aux_write,
     output [15:0] boot_aux_index,
     output [255:0] boot_aux_data,
@@ -288,6 +295,7 @@ generate
         wire local_sram_a_active_unused;
         wire local_sram_b_active_unused;
         encoder_weight_hierarchy #(
+    .USE_SDRAM(USE_SDRAM),
             .GLOBAL_DEPTH_BLOCKS         (GLOBAL_DEPTH_BLOCKS),
             .GLOBAL_INDEX_WIDTH          (GLOBAL_INDEX_WIDTH),
             .GLOBAL_MODEL_BLOCKS         (GLOBAL_MODEL_BLOCKS),
@@ -301,6 +309,11 @@ generate
             .FLASH_POWER_UP_CYCLES       (32'd7000),
             .QSPI_DUMMY_CYCLES           (8)
         ) u_weight_hierarchy (
+    .external_model_ready(external_model_ready),
+    .sdram_weight_valid(sdram_weight_valid),.sdram_weight_ready(sdram_weight_ready),
+    .sdram_weight_addr(sdram_weight_addr),.sdram_weight_rsp_valid(sdram_weight_rsp_valid),
+    .sdram_weight_rsp_ready(sdram_weight_rsp_ready),.sdram_weight_data(sdram_weight_data),
+
             .boot_aux_write(boot_aux_write),.boot_aux_index(boot_aux_index),.boot_aux_data(boot_aux_data),
             .boot_param_write(boot_param_write),.boot_param_block(boot_param_block),
             .boot_param_data(boot_param_data),

@@ -38,6 +38,10 @@
 // 位宽约定：地址通常按Byte计，Weight块为256 bit，Activation/Weight基本元素为signed INT8。
 // -----------------------------------------------------------------------------
 module encoder_weight_hierarchy #(
+    // SDRAM mode removes the complete Global array and Flash boot hardware.
+    // The first-layer cache and two local banks keep the same compute interface.
+    // Requests and responses may wait for arbitration, CAS and refresh.
+    parameter USE_SDRAM=0,
     // 适配器组织为16组，每组2个512x128宏，同拍拼成256bit。
     parameter GLOBAL_DEPTH_BLOCKS      = 8192,  // 8192 x 32 Byte = 256 KiB
     parameter GLOBAL_INDEX_WIDTH       = 13,
@@ -58,6 +62,12 @@ module encoder_weight_hierarchy #(
     parameter FLASH_POWER_UP_CYCLES    = 32'd7000,
     parameter QSPI_DUMMY_CYCLES        = 8
 ) (
+    input external_model_ready,
+    output sdram_weight_valid, input sdram_weight_ready,
+    output [25:0] sdram_weight_addr,
+    input sdram_weight_rsp_valid, output sdram_weight_rsp_ready,
+    input [255:0] sdram_weight_data,
+
     input                                       clk,
     input                                       rst_n,
 
@@ -162,6 +172,14 @@ wire         global_rvalid;
 // 连续赋值：组合生成dma_block_ready及其相邻接口信号，表达握手、选择或地址关系。
 assign dma_block_ready = (control_state == C_BOOT_WAIT) &&
     (dma_block_index < GLOBAL_MODEL_BLOCKS + BOOT_AUX_BLOCKS);
+generate if(USE_SDRAM) begin : g_sdram_global
+    assign global_rdata=sdram_weight_data;
+    assign global_rvalid=sdram_weight_rsp_valid && sdram_weight_rsp_ready;
+    assign sdram_weight_valid=global_copy_read;
+    assign sdram_weight_addr={8'd0,global_addr,5'd0};
+    assign sdram_weight_rsp_ready=(control_state==C_FIRST_WAIT || control_state==C_PREFETCH_WAIT);
+end else begin : g_legacy_global
+    assign sdram_weight_valid=0;assign sdram_weight_addr=0;assign sdram_weight_rsp_ready=0;
 opentitan_sram_1p_adapter #(
     .WIDTH                       (256),
     .DEPTH                       (GLOBAL_DEPTH_BLOCKS),
@@ -177,6 +195,7 @@ opentitan_sram_1p_adapter #(
     .rdata_o                     (global_rdata),
     .rvalid_o                    (global_rvalid)
 );
+end endgenerate
 
 // 第一层常驻区只在Boot完成后写入，正常计算期间只读。
 wire first_copy_write = (control_state == C_FIRST_WAIT) && global_rvalid;
@@ -320,6 +339,7 @@ assign global_sram_active = global_dma_write || global_copy_read;
 assign local_sram_a_active = bank_a_sram_write || bank_a_sram_read;
 // 连续赋值：组合生成local_sram_b_active及其相邻接口信号，表达握手、选择或地址关系。
 assign local_sram_b_active = bank_b_sram_write || bank_b_sram_read;
+generate if(!USE_SDRAM) begin : g_flash_boot
 qspi_weight_boot_loader #(
     .QSPI_HALF_DIV               (QSPI_HALF_DIV),
     .POWER_UP_CYCLES             (FLASH_POWER_UP_CYCLES),
@@ -342,6 +362,12 @@ qspi_weight_boot_loader #(
     .flash_sclk                  (flash_sclk),
     .flash_dq                    ({flash_hold, flash_wp, flash_miso, flash_mosi})
 );
+end else begin : g_no_flash_boot
+    assign dma_cmd_ready=0;assign dma_block_valid=0;assign dma_block_index=0;
+    assign dma_block_data=0;assign dma_done=0;assign dma_busy=0;assign dma_error=0;
+    assign flash_csn=1;assign flash_sclk=0;
+    assign flash_mosi=1'bz;assign flash_miso=1'bz;assign flash_wp=1'bz;assign flash_hold=1'bz;
+end endgenerate
 
 // 时序逻辑：在时钟沿更新control_state、dma_cmd_valid、copy_index、copy_global_base_block、copy_block_count、copy_target_bank；复位分支负责恢复确定的空闲状态。
 always @(posedge clk or negedge rst_n) begin
@@ -401,6 +427,12 @@ always @(posedge clk or negedge rst_n) begin
 
             // 上电搬运：发起 Flash -> Global SRAM 的整段加载请求。
             C_BOOT_LAUNCH: begin
+                if(USE_SDRAM) begin
+                    if(external_model_ready) begin
+                        copy_index<=0;copy_global_base_block<=FIRST_LAYER_FLASH_BASE[23:5];
+                        copy_block_count<=FIRST_LAYER_BLOCKS;control_state<=C_FIRST_ISSUE;
+                    end
+                end else begin
 
                 // 防止部署镜像超过Global SRAM后因地址截断而静默覆盖旧权重。
                 if (GLOBAL_MODEL_BLOCKS > GLOBAL_DEPTH_BLOCKS ||
@@ -417,6 +449,8 @@ always @(posedge clk or negedge rst_n) begin
                 end
             end
 
+            end
+
             // 等待 DMA 实际结束；不能把“请求已接收”当成“权重已可读”。
             C_BOOT_WAIT: begin
                 if (dma_done) begin
@@ -430,7 +464,7 @@ always @(posedge clk or negedge rst_n) begin
 
             // SRAM 同步读分为请求与返回两步，避免同拍使用尚未返回的数据。
             C_FIRST_ISSUE: begin
-                control_state <= C_FIRST_WAIT;
+                if(!USE_SDRAM || sdram_weight_ready) control_state <= C_FIRST_WAIT;
             end
             C_FIRST_WAIT: begin
                 if (global_rvalid) begin
@@ -483,7 +517,7 @@ always @(posedge clk or negedge rst_n) begin
 
             // 从 Global 发起一块 256 bit 读取，随后在 WAIT 状态写入 Local。
             C_PREFETCH_ISSUE: begin
-                control_state <= C_PREFETCH_WAIT;
+                if(!USE_SDRAM || sdram_weight_ready) control_state <= C_PREFETCH_WAIT;
             end
             C_PREFETCH_WAIT: begin
                 if (global_rvalid) begin

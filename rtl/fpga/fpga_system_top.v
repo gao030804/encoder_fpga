@@ -4,8 +4,16 @@
 // clk50_in 必须为 50 MHz；UART 921600 8N1；外部 Flash 为现有 QSPI 接口。
 // 板卡 PLL、IO pin/电压约束以及 Flash 实际引脚必须在选定开发板后补齐。
 module fpga_system_top #(
-    parameter UART_BAUD=921600
+    // Legacy Flash mode stays available. DE10 board top selects USE_SDRAM=1.
+    // BOOT_UART_BAUD differs only in accelerated simulation; board defaults match.
+    parameter UART_BAUD=921600,
+    parameter USE_SDRAM=0,
+    parameter BOOT_UART_BAUD=UART_BAUD
 ) (
+    output [12:0] DRAM_ADDR,output [1:0] DRAM_BA,
+    output DRAM_CAS_N,DRAM_RAS_N,DRAM_WE_N,DRAM_CS_N,DRAM_CKE,DRAM_CLK,
+    output DRAM_LDQM,DRAM_UDQM,inout [15:0] DRAM_DQ,
+    output model_loaded,output sdram_error,
     input clk50_in, input ext_reset_n, input pll_locked,
     input uart_rx_pin, output uart_tx_pin,
     output flash_csn, output flash_sclk,
@@ -23,10 +31,17 @@ clock_reset_ctrl u_reset (
 );
 
 wire rx_byte_valid,rx_framing_error;
+wire audio_rx_valid,audio_rx_error,boot_rx_valid,boot_rx_error;
+wire [7:0] audio_rx_byte,boot_rx_byte;
 wire [7:0] rx_byte;
+assign rx_byte_valid=(USE_SDRAM && !model_loaded)?boot_rx_valid:audio_rx_valid;
+assign rx_framing_error=(USE_SDRAM && !model_loaded)?boot_rx_error:audio_rx_error;
+assign rx_byte=(USE_SDRAM && !model_loaded)?boot_rx_byte:audio_rx_byte;
+uart_rx #(.BAUD(BOOT_UART_BAUD)) u_boot_uart_rx (.clk(clk),.rst_n(rst_n),.rx(uart_rx_pin),
+    .valid(boot_rx_valid),.data(boot_rx_byte),.framing_error(boot_rx_error));
 uart_rx #(.BAUD(UART_BAUD)) u_uart_rx (.clk(clk),.rst_n(rst_n),.rx(uart_rx_pin),
-                   .valid(rx_byte_valid),.data(rx_byte),
-                   .framing_error(rx_framing_error));
+                   .valid(audio_rx_valid),.data(audio_rx_byte),
+                   .framing_error(audio_rx_error));
 wire rx_stream_valid,rx_stream_ready,rx_overflow;
 wire [7:0] rx_stream_data;
 stream_byte_fifo #(.DEPTH(1024),.ADDR_WIDTH(10),.DROP_ON_FULL(1)) u_rx_fifo (
@@ -65,9 +80,56 @@ wire [7:0] reject_reason;
 wire dma_valid,dma_ready,dma_last;
 wire [127:0] dma_data;
 wire [15:0] dma_keep;
+wire packet_rx_ready,model_rx_ready;
+assign rx_stream_ready=(USE_SDRAM && !model_loaded)?model_rx_ready:packet_rx_ready;
+wire [2:0] sdram_rd_valid,sdram_rd_ready,sdram_rsp_valid,sdram_rsp_ready;
+wire [77:0] sdram_rd_addr;
+wire [255:0] sdram_read_data;
+wire memory_initialized,model_loader_error;
+wire [15:0] model_blocks_written;
+generate if(USE_SDRAM)begin : g_sdram
+    wire boot_valid,boot_accept,boot_ack,boot_ack_ready;
+    wire [25:0] boot_addr;
+    wire [255:0] boot_data;
+    wire mem_valid,mem_ready,mem_write,mem_rsp_valid,mem_rsp_ready,controller_error;
+    wire [25:0] mem_addr;
+    wire [255:0] mem_wdata,mem_rdata;
+    uart_sdram_model_loader u_model_loader (
+        .clk(clk),.rst_n(rst_n),.rx_valid(rx_stream_valid),.rx_ready(model_rx_ready),.rx_data(rx_stream_data),
+        .sdram_initialized(memory_initialized),.write_valid(boot_valid),.write_ready(boot_accept),
+        .write_addr(boot_addr),.write_data(boot_data),.write_rsp_valid(boot_ack),.write_rsp_ready(boot_ack_ready),
+        .model_loaded(model_loaded),.error(model_loader_error),.blocks_written(model_blocks_written)
+    );
+    sdram_arbiter u_arbiter (
+        .clk(clk),.rst_n(rst_n),.model_loaded(model_loaded),
+        .boot_valid(boot_valid),.boot_ready(boot_accept),.boot_addr(boot_addr),.boot_data(boot_data),
+        .boot_rsp_valid(boot_ack),.boot_rsp_ready(boot_ack_ready),
+        .rd_valid(sdram_rd_valid),.rd_ready(sdram_rd_ready),.rd_addr(sdram_rd_addr),
+        .rsp_valid(sdram_rsp_valid),.rsp_ready(sdram_rsp_ready),.rsp_data(sdram_read_data),
+        .req_valid(mem_valid),.req_ready(mem_ready),.req_write(mem_write),.req_addr(mem_addr),.req_data(mem_wdata),
+        .mem_rsp_valid(mem_rsp_valid),.mem_rsp_ready(mem_rsp_ready),.mem_rsp_data(mem_rdata),
+        .owner(),.outstanding()
+    );
+    sdram_controller_burst u_controller (
+        .clk(clk),.rst_n(rst_n),.req_valid(mem_valid),.req_ready(mem_ready),.req_write(mem_write),
+        .req_addr(mem_addr),.req_data(mem_wdata),.rsp_valid(mem_rsp_valid),.rsp_ready(mem_rsp_ready),.rsp_data(mem_rdata),
+        .initialized(memory_initialized),.error(controller_error),.busy(),.refresh_count(),
+        .dram_addr(DRAM_ADDR),.dram_bank(DRAM_BA),.dram_cas_n(DRAM_CAS_N),.dram_ras_n(DRAM_RAS_N),
+        .dram_we_n(DRAM_WE_N),.dram_cs_n(DRAM_CS_N),.dram_cke(DRAM_CKE),.dram_clk(DRAM_CLK),
+        .dram_ldqm(DRAM_LDQM),.dram_udqm(DRAM_UDQM),.dram_dq(DRAM_DQ)
+    );
+    assign sdram_error=controller_error || model_loader_error;
+end else begin : g_no_sdram
+    assign model_loaded=0;assign model_rx_ready=0;assign memory_initialized=0;
+    assign sdram_error=0;assign model_loader_error=0;assign model_blocks_written=0;
+    assign sdram_rd_ready=0;assign sdram_rsp_valid=0;assign sdram_read_data=0;
+    assign DRAM_ADDR=0;assign DRAM_BA=0;assign DRAM_DQ=16'bz;
+    assign {DRAM_CAS_N,DRAM_RAS_N,DRAM_WE_N,DRAM_CS_N}=4'hf;
+    assign DRAM_CKE=0;assign DRAM_CLK=0;assign DRAM_LDQM=1;assign DRAM_UDQM=1;
+end endgenerate
 uart_packet_ctrl u_packets (
-    .clk(clk),.rst_n(rst_n),.rx_valid(rx_stream_valid),
-    .rx_ready(rx_stream_ready),.rx_data(rx_stream_data),
+    .clk(clk),.rst_n(rst_n),.rx_valid(rx_stream_valid && (!USE_SDRAM || model_loaded)),
+    .rx_ready(packet_rx_ready),.rx_data(rx_stream_data),
     .reserve_valid(reserve_valid),.reserve_ready(reserve_ready),.reserve_id(reserve_id),
     .write_valid(pcm_write),.write_index(pcm_write_index),.write_data(pcm_write_data),
     .commit(pcm_commit),.abort_frame(pcm_abort),
@@ -146,7 +208,9 @@ wire param_req_valid,param_req_ready,param_rsp_valid,param_rsp_ready;
 wire [511:0] param_bias;
 wire [255:0] param_mult;
 wire [63:0] param_shift,param_zero_point;
-parameter_controller u_parameters (
+parameter_controller #(.USE_SDRAM(USE_SDRAM)) u_parameters (
+    .sdram_param_valid(sdram_rd_valid[1]),.sdram_param_ready(sdram_rd_ready[1]),.sdram_param_addr(sdram_rd_addr[26+:26]),
+    .sdram_param_rsp_valid(sdram_rsp_valid[1]),.sdram_param_rsp_ready(sdram_rsp_ready[1]),.sdram_param_data(sdram_read_data),
     .clk(clk),.rst_n(rst_n),.boot_write(boot_param_write),
     .boot_block(boot_param_block),.boot_data(boot_param_data),
     .boot_done(boot_ready),.configured(params_ready),
@@ -160,11 +224,17 @@ parameter_controller u_parameters (
 );
 
 soundstream_encoder_rvq_w8a16_top #(
+    .USE_SDRAM(USE_SDRAM),
     .CLOCK_HZ(50000000),.FLASH_SPI_DIVIDER(16'd1),
     .USE_GLOBAL_WEIGHT_HIERARCHY(1),.FAST_SIM_WEIGHT_CACHE(0),
     .GLOBAL_MODEL_BLOCKS(6912),.BOOT_AUX_BLOCKS(1536),
     .BOOT_FLASH_BASE(24'h010000),.RESIDUAL_SCALE_ALIGN_ENABLE(1)
 ) u_codec (
+    .external_model_ready(model_loaded && !sdram_error),
+    .sdram_weight_valid(sdram_rd_valid[0]),.sdram_weight_ready(sdram_rd_ready[0]),.sdram_weight_addr(sdram_rd_addr[0+:26]),
+    .sdram_weight_rsp_valid(sdram_rsp_valid[0]),.sdram_weight_rsp_ready(sdram_rsp_ready[0]),.sdram_weight_data(sdram_read_data),
+    .sdram_rvq_valid(sdram_rd_valid[2]),.sdram_rvq_ready(sdram_rd_ready[2]),.sdram_rvq_addr(sdram_rd_addr[52+:26]),
+    .sdram_rvq_rsp_valid(sdram_rsp_valid[2]),.sdram_rvq_rsp_ready(sdram_rsp_ready[2]),.sdram_rvq_data(sdram_read_data),
     .clk(clk),.rst_n(rst_n),.start(encoder_start),
     .start_ready(encoder_start_ready),.busy(encoder_busy),
     .encoder_done(encoder_done),.done(codec_done),.error(encoder_error),
@@ -213,7 +283,7 @@ soundstream_encoder_rvq_w8a16_top #(
 status_debug_regs u_status (
     .clk(clk),.rst_n(rst_n),.boot_ready(boot_ready),
     .params_ready(params_ready),.frame_busy(frame_busy),
-    .encoder_busy(encoder_busy),.encoder_error(encoder_error || frame_error || queue_error),
+    .encoder_busy(encoder_busy),.encoder_error(encoder_error || frame_error || queue_error || sdram_error),
     .packet_error(packet_error || rx_framing_error),
     .rx_overflow(rx_overflow),.tx_overflow(tx_overflow),
     .completed_frames(completed_frames),.led(led),.debug_status(debug_status)

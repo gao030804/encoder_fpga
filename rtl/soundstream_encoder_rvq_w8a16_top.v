@@ -1,4 +1,5 @@
 module soundstream_encoder_rvq_w8a16_top #(
+    parameter USE_SDRAM=0,
     parameter ADDR_WIDTH = 32,
     parameter BUFFER_A_BASE = 32'h0000_1000,
     parameter BUFFER_B_BASE = 32'h0000_5000,
@@ -24,6 +25,14 @@ module soundstream_encoder_rvq_w8a16_top #(
     // 正常部署只输出索引，32维重建向量交给软件；置1仅用于对拍调试。
     parameter ENABLE_VECTOR_DEBUG = 0
 ) (
+    input external_model_ready,
+    output sdram_rvq_valid,input sdram_rvq_ready,output [25:0] sdram_rvq_addr,
+    input sdram_rvq_rsp_valid,output sdram_rvq_rsp_ready,input [255:0] sdram_rvq_data,
+    output sdram_weight_valid, input sdram_weight_ready,
+    output [25:0] sdram_weight_addr,
+    input sdram_weight_rsp_valid, output sdram_weight_rsp_ready,
+    input [255:0] sdram_weight_data,
+
     output encoder_done,
     // encoded_valid/indices是DMA队首的兼容观察口，消费握手统一使用dma_ready。
     output encoded_valid,
@@ -167,6 +176,7 @@ assign result_rd_req_ready=!backend_busy && rd_ready;
 assign result_rd_rsp_valid=!backend_busy && rd_valid;
 assign result_rd_data=rd_data;
 soundstream_encoder_top #(
+    .USE_SDRAM(USE_SDRAM),
     .ADDR_WIDTH(ADDR_WIDTH),
     .BUFFER_A_BASE(BUFFER_A_BASE),
     .BUFFER_B_BASE(BUFFER_B_BASE),
@@ -181,6 +191,11 @@ soundstream_encoder_top #(
     .FAST_SIM_WEIGHT_CACHE(FAST_SIM_WEIGHT_CACHE),
     .RESIDUAL_SCALE_ALIGN_ENABLE(RESIDUAL_SCALE_ALIGN_ENABLE)
 ) u_encoder (
+    .external_model_ready(external_model_ready),
+    .sdram_weight_valid(sdram_weight_valid),.sdram_weight_ready(sdram_weight_ready),
+    .sdram_weight_addr(sdram_weight_addr),.sdram_weight_rsp_valid(sdram_weight_rsp_valid),
+    .sdram_weight_rsp_ready(sdram_weight_rsp_ready),.sdram_weight_data(sdram_weight_data),
+
     .boot_aux_write(boot_aux_write),
     .boot_aux_index(boot_aux_index),
     .boot_aux_data(boot_aux_data),
@@ -262,7 +277,10 @@ soundstream_encoder_top #(
     .octal_rx_last(octal_rx_last),
     .octal_rx_error(octal_rx_error)
 );
-rvq_backend_w8a16 #(.COMPUTE_VECTOR(ENABLE_VECTOR_DEBUG)) u_backend (
+rvq_backend_w8a16 #(.USE_SDRAM(USE_SDRAM),.COMPUTE_VECTOR(ENABLE_VECTOR_DEBUG)) u_backend (
+    .external_model_ready(external_model_ready),.sdram_rvq_valid(sdram_rvq_valid),
+    .sdram_rvq_ready(sdram_rvq_ready),.sdram_rvq_addr(sdram_rvq_addr),
+    .sdram_rvq_rsp_valid(sdram_rvq_rsp_valid),.sdram_rvq_rsp_ready(sdram_rvq_rsp_ready),.sdram_rvq_data(sdram_rvq_data),
     .clk(clk),.rst_n(rst_n),.boot_write(boot_aux_write),.boot_index(boot_aux_index),.boot_data(boot_aux_data),
     .start(encoder_done),.busy(backend_busy),.error(backend_error),.configured(backend_configured),
     .latent_base(result_buffer_base),.latent_req_valid(back_req),.latent_req_ready(rd_ready),
